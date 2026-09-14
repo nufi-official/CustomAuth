@@ -4,6 +4,16 @@ import { KeyType, TorusKey } from "@toruslabs/torus.js";
 
 import { AUTH_CONNECTION_TYPE, UX_MODE_TYPE } from "./enums";
 
+export interface ExtendedTorusKey extends TorusKey {
+  existingPk?: { X: string; Y: string };
+}
+
+export enum SkipTorusKey {
+  Never,
+  IfNew,
+  Always,
+}
+
 export type TorusGenericObject = {
   [key: string]: string;
 };
@@ -63,7 +73,7 @@ export type TorusUserInfo = {
   userInfo?: TorusConnectionResponse & LoginWindowResponse;
 };
 
-export type TorusLoginResponse = TorusUserInfo & TorusKey;
+export type TorusLoginResponse = TorusUserInfo & ExtendedTorusKey;
 
 export interface CustomAuthArgs {
   /**
@@ -370,6 +380,17 @@ export interface CustomAuthLoginParams {
   hash?: string;
   queryParameters?: TorusGenericObject;
   customState?: TorusGenericObject;
+  /**
+   * Controls whether triggerLogin should retrieve the Torus private key after OAuth.
+   * @defaultValue SkipTorusKey.Never
+   */
+  skipTorusKey?: SkipTorusKey;
+  /**
+   * When true, looks up an existing Torus public key and returns it as `existingPk`
+   * without assigning a new key.
+   * @defaultValue false
+   */
+  checkIfNewKey?: boolean;
 }
 
 export interface CreateHandlerParams {

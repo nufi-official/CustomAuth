@@ -6,16 +6,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHandler } from "../../src/handlers/HandlerFactory";
 import { UX_MODE } from "../../src/utils/enums";
 import { CustomAuthLoginError, CustomAuthLoginErrorPrefix } from "../../src/utils/error";
-import type { CustomAuthArgs, ILoginHandler, LoginWindowResponse, TorusConnectionResponse } from "../../src/utils/interfaces";
+import {
+  type CustomAuthArgs,
+  type ILoginHandler,
+  type LoginWindowResponse,
+  SkipTorusKey,
+  type TorusConnectionResponse,
+} from "../../src/utils/interfaces";
+
+const { retrieveShares, VerifierLookupRequest } = vi.hoisted(() => ({
+  retrieveShares: vi.fn().mockResolvedValue({
+    finalKeyData: { privKey: "0xdeadbeef" },
+  }),
+  VerifierLookupRequest: vi.fn().mockResolvedValue({
+    keyResult: { keys: [] },
+  }),
+}));
 
 vi.mock("@toruslabs/torus.js", () => {
   function Torus() {
-    (this as Record<string, unknown>).retrieveShares = vi.fn().mockResolvedValue({
-      finalKeyData: { privKey: "0xdeadbeef" },
-    });
+    (this as Record<string, unknown>).retrieveShares = retrieveShares;
   }
   Torus.setAPIKey = vi.fn();
-  return { Torus };
+  return { Torus, VerifierLookupRequest };
 });
 
 vi.mock("@toruslabs/fetch-node-details", () => ({
@@ -240,6 +253,100 @@ describe("CustomAuth", () => {
       expect(createSessionSpy).not.toHaveBeenCalled();
       expect(authorizeSessionSpy).not.toHaveBeenCalled();
       expect(handler.getUserInfo).toHaveBeenCalled();
+    });
+  });
+
+  describe("triggerLogin – skipTorusKey", () => {
+    function setupPopupLogin() {
+      const handler = mockLoginHandler();
+      vi.mocked(createHandler).mockReturnValue(handler);
+      return handler;
+    }
+
+    it("skips retrieveShares when skipTorusKey is Always", async () => {
+      const CustomAuth = await getCustomAuth();
+      setupPopupLogin();
+
+      const auth = new CustomAuth(BASE_ARGS);
+      auth.isInitialized = true;
+
+      const result = await auth.triggerLogin({
+        authConnection: "google",
+        authConnectionId: "google-verifier",
+        clientId: "google-client-id",
+        skipTorusKey: SkipTorusKey.Always,
+      });
+
+      expect(retrieveShares).not.toHaveBeenCalled();
+      expect(VerifierLookupRequest).not.toHaveBeenCalled();
+      expect(result.userInfo?.userId).toBe("user@test.com");
+      expect(result.existingPk).toBeUndefined();
+      expect(result.finalKeyData).toBeUndefined();
+    });
+
+    it("looks up existingPk without retrieving shares when checkIfNewKey is true and skip is Always", async () => {
+      const CustomAuth = await getCustomAuth();
+      setupPopupLogin();
+      VerifierLookupRequest.mockResolvedValueOnce({
+        keyResult: { keys: [{ pub_key_X: "pkx", pub_key_Y: "pky", address: "0xabc" }] },
+      });
+
+      const auth = new CustomAuth(BASE_ARGS);
+      auth.isInitialized = true;
+
+      const result = await auth.triggerLogin({
+        authConnection: "google",
+        authConnectionId: "google-verifier",
+        clientId: "google-client-id",
+        skipTorusKey: SkipTorusKey.Always,
+        checkIfNewKey: true,
+      });
+
+      expect(VerifierLookupRequest).toHaveBeenCalled();
+      expect(retrieveShares).not.toHaveBeenCalled();
+      expect(result.existingPk).toEqual({ X: "pkx", Y: "pky" });
+    });
+
+    it("retrieves shares for existing keys when skipTorusKey is IfNew", async () => {
+      const CustomAuth = await getCustomAuth();
+      setupPopupLogin();
+      VerifierLookupRequest.mockResolvedValueOnce({
+        keyResult: { keys: [{ pub_key_X: "pkx", pub_key_Y: "pky", address: "0xabc" }] },
+      });
+
+      const auth = new CustomAuth(BASE_ARGS);
+      auth.isInitialized = true;
+
+      await auth.triggerLogin({
+        authConnection: "google",
+        authConnectionId: "google-verifier",
+        clientId: "google-client-id",
+        skipTorusKey: SkipTorusKey.IfNew,
+      });
+
+      expect(VerifierLookupRequest).toHaveBeenCalled();
+      expect(retrieveShares).toHaveBeenCalled();
+    });
+
+    it("skips retrieveShares for new keys when skipTorusKey is IfNew", async () => {
+      const CustomAuth = await getCustomAuth();
+      setupPopupLogin();
+      VerifierLookupRequest.mockResolvedValueOnce({
+        keyResult: { keys: [] },
+      });
+
+      const auth = new CustomAuth(BASE_ARGS);
+      auth.isInitialized = true;
+
+      const result = await auth.triggerLogin({
+        authConnection: "google",
+        authConnectionId: "google-verifier",
+        clientId: "google-client-id",
+        skipTorusKey: SkipTorusKey.IfNew,
+      });
+
+      expect(retrieveShares).not.toHaveBeenCalled();
+      expect(result.existingPk).toBeUndefined();
     });
   });
 

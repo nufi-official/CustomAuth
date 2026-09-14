@@ -2,7 +2,7 @@ import { BUILD_ENV, BUILD_ENV_TYPE, type INodeDetails, STORAGE_SERVER_MAP, TORUS
 import { NodeDetailManager } from "@toruslabs/fetch-node-details";
 import { type Hex, keccak256, remove0x, utf8ToBytes } from "@toruslabs/metadata-helpers";
 import { StorageManager } from "@toruslabs/session-manager";
-import { type KeyType, Torus, TorusKey } from "@toruslabs/torus.js";
+import { type KeyType, Torus, type TorusKey, VerifierLookupRequest } from "@toruslabs/torus.js";
 
 import { createHandler } from "./handlers/HandlerFactory";
 import { registerServiceWorker } from "./registerServiceWorker";
@@ -20,6 +20,7 @@ import {
   LoginWindowResponse,
   RedirectResult,
   RedirectResultParams,
+  SkipTorusKey,
   TorusLoginResponse,
   VerifierParams,
 } from "./utils/interfaces";
@@ -157,7 +158,18 @@ export class CustomAuth {
       throw new Error("Not initialized yet");
     }
 
-    const { authConnectionId, authConnection, clientId, jwtParams, hash, queryParameters, customState, groupedAuthConnectionId } = args;
+    const {
+      authConnectionId,
+      authConnection,
+      clientId,
+      jwtParams,
+      hash,
+      queryParameters,
+      customState,
+      groupedAuthConnectionId,
+      skipTorusKey = SkipTorusKey.Never,
+      checkIfNewKey = false,
+    } = args;
     const loginHandler: ILoginHandler = createHandler({
       authConnection,
       clientId,
@@ -204,18 +216,29 @@ export class CustomAuth {
 
     const userInfo = await loginHandler.getUserInfo(loginParams);
 
-    const torusKey = await this.getTorusKey({
-      authConnectionId,
-      userId: userInfo.userId,
-      idToken: loginParams.idToken || loginParams.accessToken,
-      additionalParams: userInfo.extraConnectionParams,
-      groupedAuthConnectionId,
-      recordId: args.customState?.recordId,
-      authConnection: userInfo.authConnection,
-    });
+    const verifier = groupedAuthConnectionId || authConnectionId;
+    const verifierId = userInfo.userId;
+    let existingPk: { X: string; Y: string } | undefined;
+    if (checkIfNewKey || skipTorusKey === SkipTorusKey.IfNew) {
+      existingPk = await this.lookupExistingPk(verifier, verifierId);
+    }
+
+    const skip = this.shouldSkipTorusKey(skipTorusKey, existingPk);
+    const torusKey = skip
+      ? undefined
+      : await this.getTorusKey({
+          authConnectionId,
+          userId: userInfo.userId,
+          idToken: loginParams.idToken || loginParams.accessToken,
+          additionalParams: userInfo.extraConnectionParams,
+          groupedAuthConnectionId,
+          recordId: args.customState?.recordId,
+          authConnection: userInfo.authConnection,
+        });
 
     return {
-      ...torusKey,
+      ...(torusKey as TorusKey),
+      existingPk,
       userInfo: {
         ...userInfo,
         ...loginParams,
@@ -411,5 +434,35 @@ export class CustomAuth {
   private getSessionId(key: string): Hex {
     // SessionManager expects a hex private key as sessionId; hashing the legacy string key keeps compatibility
     return keccak256(utf8ToBytes(key)) as Hex;
+  }
+
+  private async lookupExistingPk(verifier: string, verifierId: string): Promise<{ X: string; Y: string } | undefined> {
+    const nodeDetails =
+      this.config.nodeDetails ??
+      (await this.nodeDetailManager.getNodeDetails({
+        verifier,
+        verifierId,
+      }));
+    const lookupData = await VerifierLookupRequest({
+      endpoints: nodeDetails.torusNodeEndpoints,
+      verifier,
+      verifierId,
+      keyType: this.config.keyType,
+    });
+    const key = lookupData?.keyResult?.keys?.[0];
+    return key ? { X: key.pub_key_X, Y: key.pub_key_Y } : undefined;
+  }
+
+  private shouldSkipTorusKey(skipTorusKey: SkipTorusKey, existingPk?: { X: string; Y: string }): boolean {
+    switch (skipTorusKey) {
+      case SkipTorusKey.IfNew:
+        return !existingPk;
+      case SkipTorusKey.Always:
+        return true;
+      case SkipTorusKey.Never:
+        return false;
+      default:
+        throw new Error("Invalid SkipTorusKey");
+    }
   }
 }
